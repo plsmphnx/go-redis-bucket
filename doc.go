@@ -1,5 +1,5 @@
-// A Redis-backed rate limiter, based on the leaky-bucket algorithm, implemented
-// using a purely EVAL-based solution.
+// A Redis-backed rate limiter, based on the leaky-bucket algorithm,
+// implemented using a purely EVAL-based solution.
 //
 //	package main
 //
@@ -18,12 +18,7 @@
 //		r := redis.NewClient(&redis.Options{})
 //
 //		// Create a limiter that restricts calls to 10-20 per minute.
-//		l, err := limiter.NewLimiter(limiter.Config{
-//			Redis: Redis{r},
-//			Buckets: []limiter.Bucket{
-//				limiter.Capacity{Window: time.Minute, Min: 10, Max: 20},
-//			},
-//		})
+//		l, err := limiter.New(Redis{r}, limiter.Capacity{Window: time.Minute, Min: 10, Max: 20})
 //		if err != nil {
 //			panic(err)
 //		}
@@ -53,4 +48,4 @@
 //	func (r Redis) EvalSha(ctx context.Context, sha string, keys []string, args []any) (any, error) {
 //		return r.Client.EvalSha(ctx, sha, keys, args...).Result()
 //	}
-package main
+package limiter

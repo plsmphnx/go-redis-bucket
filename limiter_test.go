@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-package main_test
+package limiter_test
 
 import (
 	"context"
@@ -49,40 +49,19 @@ func TestBasicValidation(t *testing.T) {
 	defer f.Done(ctx)
 
 	// Fails with no client.
-	capacity := limiter.Capacity{Window: time.Minute, Min: 10, Max: 20}
-	_, err := limiter.NewLimiter(limiter.Config{
-		Buckets: []limiter.Bucket{capacity},
-	})
-	assert.Error(t, err)
-
-	// Fails with no buckets.
-	_, err = limiter.NewLimiter(limiter.Config{
-		Redis: f,
-	})
+	_, err := limiter.New(nil, limiter.Capacity{Window: time.Minute, Min: 10, Max: 20})
 	assert.Error(t, err)
 
 	// Fails with a negative capacity window.
-	capacity = limiter.Capacity{Window: -time.Minute, Min: 10, Max: 20}
-	_, err = limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{capacity},
-	})
+	_, err = limiter.New(f, limiter.Capacity{Window: -time.Minute, Min: 10, Max: 20})
 	assert.Error(t, err)
 
 	// Fails with no buffer between min and max.
-	capacity = limiter.Capacity{Window: time.Minute, Min: 10, Max: 10}
-	_, err = limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{capacity},
-	})
+	_, err = limiter.New(f, limiter.Capacity{Window: time.Minute, Min: 10, Max: 10})
 	assert.Error(t, err)
 
 	// Fails with a zero rate metric.
-	rate := limiter.Rate{Flow: 1, Burst: 0}
-	_, err = limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{rate},
-	})
+	_, err = limiter.New(f, limiter.Rate{Flow: 1, Burst: 0})
 	assert.Error(t, err)
 }
 
@@ -92,10 +71,7 @@ func TestBasicCapacityMetrics(t *testing.T) {
 	defer f.Done(ctx)
 
 	capacity := limiter.Capacity{Window: time.Minute, Min: 10, Max: 20}
-	l, err := limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{capacity},
-	})
+	l, err := limiter.New(f, capacity)
 	assert.NoError(t, err)
 
 	// Perform test twice, for burst and steady-state near capacity.
@@ -125,10 +101,7 @@ func TestBasicRateMetrics(t *testing.T) {
 	defer f.Done(ctx)
 
 	rate := limiter.Rate{Burst: 9, Flow: 1.0 / 2.0}
-	l, err := limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{rate},
-	})
+	l, err := limiter.New(f, rate)
 	assert.NoError(t, err)
 
 	// Perform test twice to ensure full drain.
@@ -175,11 +148,7 @@ func TestMultipleRates(t *testing.T) {
 
 	slow := limiter.Rate{Burst: 18.0, Flow: 1.0 / 4.0}
 	fast := limiter.Rate{Burst: 9.0, Flow: 1.0 / 2.0}
-	l, err := limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{slow, fast},
-		Backoff: limiter.Exponential(2.0),
-	})
+	l, err := limiter.New(f, slow, limiter.WithAdditionalBucket(fast), limiter.WithExponentialBackoff(2))
 	assert.NoError(t, err)
 
 	base := f.Now()
@@ -243,10 +212,7 @@ func TestSubsecondDeltas(t *testing.T) {
 	defer f.Done(ctx)
 
 	capacity := limiter.Capacity{Window: time.Second, Min: 4, Max: 5}
-	l, err := limiter.NewLimiter(limiter.Config{
-		Redis:   f,
-		Buckets: []limiter.Bucket{capacity},
-	})
+	l, err := limiter.New(f, capacity)
 	assert.NoError(t, err)
 
 	base := f.Now()
@@ -275,16 +241,14 @@ func (t superfluousRateTester) Eval(ctx context.Context, script string, keys []s
 }
 
 func TestSuperfluousRates(t *testing.T) {
-	l, err := limiter.NewLimiter(limiter.Config{
-		Redis: superfluousRateTester{t},
-		Buckets: []limiter.Bucket{
-			limiter.Rate{Burst: 4, Flow: 0.1}, // 1 - Valid
-			limiter.Rate{Burst: 3, Flow: 0.2}, // 2 - Strictly larger than 3
-			limiter.Rate{Burst: 2, Flow: 0.2}, // 3 - Valid
-			limiter.Rate{Burst: 2, Flow: 0.3}, // 4 - Strictly larger than 3
-			limiter.Rate{Burst: 1, Flow: 0.4}, // 5 - Valid
-		},
-	})
+	l, err := limiter.New(
+		superfluousRateTester{t},
+		limiter.Rate{Burst: 4, Flow: 0.1},                               // 1 - Valid
+		limiter.WithAdditionalBucket(limiter.Rate{Burst: 3, Flow: 0.2}), // 2 - Strictly larger than 3
+		limiter.WithAdditionalBucket(limiter.Rate{Burst: 2, Flow: 0.2}), // 3 - Valid
+		limiter.WithAdditionalBucket(limiter.Rate{Burst: 2, Flow: 0.3}), // 4 - Strictly larger than 3
+		limiter.WithAdditionalBucket(limiter.Rate{Burst: 1, Flow: 0.4}), // 5 - Valid
+	)
 	assert.NoError(t, err)
 
 	_, err = l.Test(context.Background(), "key", 1)
@@ -308,30 +272,11 @@ func (t errorPassingTester) Error() string {
 
 func TestErrorPassing(t *testing.T) {
 	error := errorPassingTester{t}
-	l, err := limiter.NewLimiter(limiter.Config{
-		Redis:   error,
-		Buckets: []limiter.Bucket{limiter.Rate{Burst: 4, Flow: 0.1}},
-	})
+	l, err := limiter.New(error, limiter.Rate{Burst: 4, Flow: 0.1})
 	assert.NoError(t, err)
 
 	_, err = l.Test(context.Background(), "key", 1)
 	assert.ErrorIs(t, err, error)
-}
-
-func TestScaling(t *testing.T) {
-	factor := 2.0
-	denied := 3.0
-	for _, test := range []struct {
-		backoff limiter.Backoff
-		result  float64
-	}{
-		{limiter.Constant(factor), 2.0},
-		{limiter.Linear(factor), 6.0},
-		{limiter.Power(factor), 9.0},
-		{limiter.Exponential(factor), 8.0},
-	} {
-		assert.Equal(t, test.backoff.Backoff(denied), test.result)
-	}
 }
 
 // Test framework, which also serves as the Redis limiter.Client implementation.

@@ -1,45 +1,41 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-package main
+package limiter
 
 import "math"
 
-type (
-	// Backoff represents a scaling backoff function for repeated denials.
-	Backoff interface {
-		Backoff(float64) float64
+// WithConstantBackoff applies a constant backoff to the limiter.
+func WithConstantBackoff(factor float64) Config {
+	return func(c *config) {
+		c.backoff = func(deny float64) float64 { return factor }
 	}
-
-	// Constant represents a constant backoff factor.
-	Constant float64
-
-	// Linear represents a linear backoff factor.
-	Linear float64
-
-	// Power represents a power backoff factor.
-	Power float64
-
-	// Exponential represents an exponential backoff factor.
-	Exponential float64
-)
-
-// Backoff computes a constant backoff value.
-func (c Constant) Backoff(value float64) float64 {
-	return float64(c)
 }
 
-// Backoff computes a linear backoff value.
-func (l Linear) Backoff(value float64) float64 {
-	return float64(l) * value
+// WithLinearBackoff applies a linear backoff to the limiter.
+func WithLinearBackoff(factor float64) Config {
+	return func(c *config) {
+		c.backoff = func(deny float64) float64 { return factor * deny }
+	}
 }
 
-// Backoff computes a power backoff value.
-func (p Power) Backoff(value float64) float64 {
-	return math.Pow(value, float64(p))
+// WithPowerBackoff applies a power backoff to the limiter.
+func WithPowerBackoff(factor float64) Config {
+	return func(c *config) {
+		c.backoff = func(deny float64) float64 { return math.Pow(deny, factor) }
+	}
 }
 
-// Backoff computes an exponential backoff value.
-func (e Exponential) Backoff(value float64) float64 {
-	return math.Pow(float64(e), value)
+// WithExponentialBackoff applies an exponential backoff to the limiter.
+func WithExponentialBackoff(factor float64) Config {
+	return func(c *config) {
+		c.backoff = func(deny float64) float64 { return math.Pow(factor, deny) }
+	}
+}
+
+// WithCustomBackoff applies a custom backoff to the limiter.
+func WithCustomBackoff(backoff func(float64) float64) Config {
+	return func(c *config) {
+		c.backoff = backoff
+	}
 }

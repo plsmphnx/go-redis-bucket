@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-package main
+package limiter
 
 import "time"
 
@@ -50,4 +50,12 @@ func (r Rate) Rate() (float64, float64) {
 // Rate returns the flow and burst parameters for a Capacity bucket.
 func (c Capacity) Rate() (float64, float64) {
 	return c.Min / c.Window.Seconds(), c.Max - c.Min
+}
+
+// WithAdditionalBucket adds an additional rate-limiting bucket to the limiter.
+func WithAdditionalBucket(bucket Bucket) Config {
+	return func(c *config) {
+		flow, burst := bucket.Rate()
+		c.rates = append(c.rates, Rate{flow, burst})
+	}
 }

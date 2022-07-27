@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-package main
+package limiter
 
 import (
 	"context"
@@ -13,18 +13,12 @@ import (
 
 type (
 	// Config provides configuration values for creating a new rate-limiter.
-	Config struct {
-		// Redis is the Redis client for this rate-limiter.
-		Redis Eval
+	Config func(*config)
 
-		// Prefix is a string that will be added to the beginning of all keys.
-		Prefix string
-
-		// Backoff is the backoff scaling function (default 2x linear).
-		Backoff Backoff
-
-		// Buckets are the rate-limiting metrics.
-		Buckets []Bucket
+	config struct {
+		rates   []Rate
+		prefix  string
+		backoff func(float64) float64
 	}
 
 	// Limiter provides a single rate-limiter instance.
@@ -32,7 +26,7 @@ type (
 		args    []any
 		redis   Eval
 		prefix  string
-		backoff Backoff
+		backoff func(float64) float64
 	}
 
 	// Result provides the result of a rate-limiting test.
@@ -48,53 +42,50 @@ type (
 	}
 )
 
-// NewLimiter creates a new rate-limiter instance.
-func NewLimiter(c Config) (*Limiter, error) {
-	if c.Redis == nil {
-		return nil, errors.New("the limiter must have a redis client")
+// WithPrefix adds the given string to the beginning of all keys.
+func WithPrefix(prefix string) Config {
+	return func(c *config) { c.prefix = prefix }
+}
+
+// New creates a new rate-limiter instance.
+func New(redis Eval, bucket Bucket, configs ...Config) (*Limiter, error) {
+	if redis == nil {
+		return nil, errors.New("limiter: must have a redis client")
 	}
 
-	if len(c.Buckets) == 0 {
-		return nil, errors.New("the limiter must have provided rates")
-	}
-
-	if c.Backoff == nil {
-		c.Backoff = Linear(2)
-	}
-
-	// Resolve all bucket metrics.
-	rates := make([]struct{ flow, burst float64 }, len(c.Buckets))
-	for i, b := range c.Buckets {
-		rates[i].flow, rates[i].burst = b.Rate()
-		if rates[i].flow <= 0 || rates[i].burst <= 0 {
-			return nil, errors.New("all rate parameters must be positive")
-		}
+	c := &config{}
+	WithLinearBackoff(2)(c)
+	WithAdditionalBucket(bucket)(c)
+	for _, cfg := range configs {
+		cfg(c)
 	}
 
 	// Sort rates by the slowest to fastest flow for consistency, or by burst
 	// if flow is the same (to make them easier to filter out later).
-	sort.Slice(rates, func(i int, j int) bool {
-		if rates[i].flow != rates[j].flow {
-			return rates[i].flow < rates[j].flow
+	sort.Slice(c.rates, func(i int, j int) bool {
+		if c.rates[i].Flow != c.rates[j].Flow {
+			return c.rates[i].Flow < c.rates[j].Flow
 		}
-		return rates[i].burst < rates[j].burst
+		return c.rates[i].Burst < c.rates[j].Burst
 	})
 
-	args := []any{rates[0].flow, rates[0].burst}
-	for _, r := range rates[1:] {
+	// Turn the rate parameters into appropriate arguments for the Lua script.
+	args := []any{c.rates[0].Flow, c.rates[0].Burst}
+	for _, r := range c.rates[1:] {
 		// Any limit that is strictly larger than another is superfluous,
 		// as the smaller limit will always be more restrictive.
-		if r.burst < args[len(args)-1].(float64) {
-			args = append(args, r.flow, r.burst)
+		if r.Burst < args[len(args)-1].(float64) {
+			args = append(args, r.Flow, r.Burst)
 		}
 	}
 
-	return &Limiter{
-		args:    args,
-		redis:   c.Redis,
-		prefix:  c.Prefix,
-		backoff: c.Backoff,
-	}, nil
+	for _, arg := range args {
+		if arg.(float64) <= 0 {
+			return nil, errors.New("limiter: rate parameters must be positive")
+		}
+	}
+
+	return &Limiter{args, redis, c.prefix, c.backoff}, nil
 }
 
 // Test whether the given action should be allowed according to the rate limits.
@@ -119,7 +110,7 @@ func (l *Limiter) Test(ctx context.Context, key string, cost float64) (Result, e
 		return Result{Allow: true, Free: value}, nil
 	} else {
 		flow := args[2*index-1].(float64)
-		wait := (cost / flow) * l.backoff.Backoff(value/cost)
+		wait := (cost / flow) * l.backoff(value/cost)
 		return Result{Allow: false, Wait: time.Duration(wait * float64(time.Second))}, nil
 	}
 }
@@ -136,6 +127,6 @@ func validate(raw any) (allow int64, value float64, index int64, err error) {
 			}
 		}
 	}
-	err = errors.New("invalid type returned from eval")
+	err = errors.New("limiter: invalid type returned from eval")
 	return
 }
